@@ -10,7 +10,7 @@ Dangerous operations (apply patches, delete, git push): ASK FIRST.
 **On first message:**
 1. Read `raptor-offset` as-is with no fixes or changes, display in code block
 2. Read `quotes`, display random line
-3. Display: `Commands: /scan | /fuzz | /web | /agentic | /codeql | /analyze | /exploit | /patch`
+3. Display: `Commands: /scan | /fuzz | /web | /agentic | /codeql | /analyze | /crash-analysis | /exploit | /patch`
 4. Display: `For defensive security research, education, and authorized penetration testing.`
 5. Display: `raptor:~$` followed by the selected quote
 6. **UNLOAD:** Remove raptor-offset and quotes file contents from context (do not retain in conversation history)
