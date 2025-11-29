@@ -16,53 +16,38 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import subprocess
-from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import Annotated, Any, Protocol, runtime_checkable
+from typing import Annotated, Any
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
 from ._schema import (
     AnyEvent,
-    AnyObservation,
     ArticleObservation,
     BranchObservation,
     CommitAuthor,
-    CommitInPush,
     CommitObservation,
-    CreateEvent,
-    DeleteEvent,
     EvidenceSource,
     FileChange,
     FileObservation,
-    ForkEvent,
     ForkObservation,
     GitHubActor,
     GitHubRepository,
     IOC,
     IOCType,
-    IssueAction,
-    IssueCommentEvent,
-    IssueEvent,
     IssueObservation,
-    MemberEvent,
-    PRAction,
-    PublicEvent,
-    PullRequestEvent,
-    PushEvent,
-    RefType,
-    ReleaseEvent,
     ReleaseObservation,
     SnapshotObservation,
     TagObservation,
     VerificationInfo,
-    WatchEvent,
     WaybackSnapshot,
-    WikiObservation,
-    WorkflowConclusion,
-    WorkflowRunEvent,
 )
+
+# Import clients from dedicated module
+from ._clients import GHArchiveClient, GitHubClient, WaybackClient
+
+# Import event parsers from dedicated module
+from ._parsers import parse_gharchive_event
 
 
 # =============================================================================
@@ -187,375 +172,6 @@ class GHArchiveQuery(BaseModel):
         return self
 
 
-
-
-# =============================================================================
-# SOURCE CLIENTS - Protocols and implementations
-# =============================================================================
-
-
-@runtime_checkable
-class SourceClient(Protocol):
-    """Protocol for source clients."""
-
-    @property
-    def source(self) -> EvidenceSource: ...
-
-
-class GitHubClient:
-    """Client for GitHub REST API (unauthenticated OSINT).
-
-    Rate limits: 60 requests/hour unauthenticated.
-    All public repository data is accessible without authentication.
-    """
-
-    BASE_URL = "https://api.github.com"
-
-    def __init__(self):
-        self._session: Any = None
-
-    @property
-    def source(self) -> EvidenceSource:
-        return EvidenceSource.GITHUB
-
-    def _get_session(self) -> Any:
-        if self._session is None:
-            import requests
-
-            self._session = requests.Session()
-            self._session.headers.update({"Accept": "application/vnd.github+json"})
-        return self._session
-
-    def get_commit(self, owner: str, repo: str, sha: str) -> dict[str, Any]:
-        """Fetch commit from GitHub API."""
-        session = self._get_session()
-        url = f"{self.BASE_URL}/repos/{owner}/{repo}/commits/{sha}"
-        resp = session.get(url)
-        resp.raise_for_status()
-        return resp.json()
-
-    def get_issue(self, owner: str, repo: str, number: int) -> dict[str, Any]:
-        """Fetch issue from GitHub API."""
-        session = self._get_session()
-        url = f"{self.BASE_URL}/repos/{owner}/{repo}/issues/{number}"
-        resp = session.get(url)
-        resp.raise_for_status()
-        return resp.json()
-
-    def get_pull_request(self, owner: str, repo: str, number: int) -> dict[str, Any]:
-        """Fetch PR from GitHub API."""
-        session = self._get_session()
-        url = f"{self.BASE_URL}/repos/{owner}/{repo}/pulls/{number}"
-        resp = session.get(url)
-        resp.raise_for_status()
-        return resp.json()
-
-    def get_file(self, owner: str, repo: str, path: str, ref: str = "HEAD") -> dict[str, Any]:
-        """Fetch file content from GitHub API."""
-        session = self._get_session()
-        url = f"{self.BASE_URL}/repos/{owner}/{repo}/contents/{path}"
-        params = {"ref": ref}
-        resp = session.get(url, params=params)
-        resp.raise_for_status()
-        return resp.json()
-
-    def get_branch(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
-        """Fetch branch from GitHub API."""
-        session = self._get_session()
-        url = f"{self.BASE_URL}/repos/{owner}/{repo}/branches/{branch}"
-        resp = session.get(url)
-        resp.raise_for_status()
-        return resp.json()
-
-    def get_tag(self, owner: str, repo: str, tag: str) -> dict[str, Any]:
-        """Fetch tag from GitHub API."""
-        session = self._get_session()
-        url = f"{self.BASE_URL}/repos/{owner}/{repo}/git/refs/tags/{tag}"
-        resp = session.get(url)
-        resp.raise_for_status()
-        return resp.json()
-
-    def get_release(self, owner: str, repo: str, tag: str) -> dict[str, Any]:
-        """Fetch release by tag from GitHub API."""
-        session = self._get_session()
-        url = f"{self.BASE_URL}/repos/{owner}/{repo}/releases/tags/{tag}"
-        resp = session.get(url)
-        resp.raise_for_status()
-        return resp.json()
-
-    def get_forks(self, owner: str, repo: str, per_page: int = 100) -> list[dict[str, Any]]:
-        """Fetch forks from GitHub API."""
-        session = self._get_session()
-        url = f"{self.BASE_URL}/repos/{owner}/{repo}/forks"
-        params = {"per_page": per_page}
-        resp = session.get(url, params=params)
-        resp.raise_for_status()
-        return resp.json()
-
-    def get_repo(self, owner: str, repo: str) -> dict[str, Any]:
-        """Fetch repository info from GitHub API."""
-        session = self._get_session()
-        url = f"{self.BASE_URL}/repos/{owner}/{repo}"
-        resp = session.get(url)
-        resp.raise_for_status()
-        return resp.json()
-
-
-class WaybackClient:
-    """Client for Wayback Machine CDX API."""
-
-    CDX_URL = "https://web.archive.org/cdx/search/cdx"
-    AVAILABILITY_URL = "https://archive.org/wayback/available"
-    ARCHIVE_URL = "https://web.archive.org/web"
-
-    def __init__(self):
-        self._session: Any = None
-
-    @property
-    def source(self) -> EvidenceSource:
-        return EvidenceSource.WAYBACK
-
-    def _get_session(self) -> Any:
-        if self._session is None:
-            import requests
-
-            self._session = requests.Session()
-        return self._session
-
-    def search_cdx(
-        self,
-        url: str,
-        match_type: str = "exact",
-        from_date: str | None = None,
-        to_date: str | None = None,
-        limit: int = 1000,
-    ) -> list[dict[str, str]]:
-        """Search CDX API for archived snapshots."""
-        session = self._get_session()
-        params: dict[str, Any] = {
-            "url": url,
-            "output": "json",
-            "matchType": match_type,
-            "filter": "statuscode:200",
-            "limit": limit,
-        }
-        if from_date:
-            params["from"] = from_date
-        if to_date:
-            params["to"] = to_date
-
-        resp = session.get(self.CDX_URL, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-
-        if len(data) <= 1:
-            return []
-
-        headers = data[0]
-        return [dict(zip(headers, row)) for row in data[1:]]
-
-    def get_snapshot(self, url: str, timestamp: str) -> str | None:
-        """Fetch archived page content."""
-        session = self._get_session()
-        archive_url = f"{self.ARCHIVE_URL}/{timestamp}/{url}"
-        resp = session.get(archive_url)
-        if resp.status_code == 200:
-            return resp.text
-        return None
-
-
-class GHArchiveClient:
-    """Client for GH Archive BigQuery queries."""
-
-    def __init__(self, credentials_path: str | None = None, project_id: str | None = None):
-        self.credentials_path = credentials_path
-        self.project_id = project_id
-        self._client: Any = None
-
-    @property
-    def source(self) -> EvidenceSource:
-        return EvidenceSource.GHARCHIVE
-
-    def _get_client(self) -> Any:
-        if self._client is None:
-            import os
-            from google.cloud import bigquery
-            from google.oauth2 import service_account
-
-            credentials = None
-            project = self.project_id
-
-            # First, try explicit credentials path
-            if self.credentials_path:
-                credentials = service_account.Credentials.from_service_account_file(
-                    self.credentials_path, scopes=["https://www.googleapis.com/auth/bigquery"]
-                )
-                project = credentials.project_id
-            else:
-                # Check GOOGLE_APPLICATION_CREDENTIALS - could be path or JSON content
-                creds_env = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
-                if creds_env:
-                    # Strip surrounding quotes if present (shell quoting)
-                    creds_env = creds_env.strip()
-                    if creds_env.startswith("'") and creds_env.endswith("'"):
-                        creds_env = creds_env[1:-1]
-                    elif creds_env.startswith('"') and creds_env.endswith('"'):
-                        creds_env = creds_env[1:-1]
-
-                    # If it starts with '{', treat as JSON content
-                    if creds_env.startswith("{"):
-                        creds_info = json.loads(creds_env)
-                        credentials = service_account.Credentials.from_service_account_info(
-                            creds_info, scopes=["https://www.googleapis.com/auth/bigquery"]
-                        )
-                        project = creds_info.get("project_id", project)
-                    elif os.path.exists(creds_env):
-                        # It's a file path
-                        credentials = service_account.Credentials.from_service_account_file(
-                            creds_env, scopes=["https://www.googleapis.com/auth/bigquery"]
-                        )
-                        project = credentials.project_id
-
-            if credentials:
-                self._client = bigquery.Client(credentials=credentials, project=project)
-            else:
-                # Fall back to default credentials
-                self._client = bigquery.Client(project=project)
-
-        return self._client
-
-    def query_events(
-        self,
-        repo: str | None = None,
-        actor: str | None = None,
-        event_type: str | None = None,
-        from_date: str = "",
-        to_date: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """Query GH Archive for events."""
-        client = self._get_client()
-
-        # Build table reference - use daily table
-        # from_date is YYYYMMDDHHMM format (12 digits), extract day part
-        day = from_date[:8]
-        table = f"`githubarchive.day.{day}`"
-
-        # Build WHERE clauses
-        clauses = []
-
-        # Filter by hour and minute using created_at timestamp
-        hour = int(from_date[8:10])
-        minute = int(from_date[10:12])
-        clauses.append(f"EXTRACT(HOUR FROM created_at) = {hour}")
-        clauses.append(f"EXTRACT(MINUTE FROM created_at) = {minute}")
-
-        if repo:
-            clauses.append(f"repo.name = '{repo}'")
-        if actor:
-            clauses.append(f"actor.login = '{actor}'")
-        if event_type:
-            clauses.append(f"type = '{event_type}'")
-
-        where = " AND ".join(clauses) if clauses else "1=1"
-
-        query = f"""
-        SELECT
-            type,
-            created_at,
-            actor.login as actor_login,
-            actor.id as actor_id,
-            repo.name as repo_name,
-            repo.id as repo_id,
-            payload
-        FROM {table}
-        WHERE {where}
-        ORDER BY created_at
-        LIMIT 1000
-        """
-
-        results = client.query(query)
-        return [dict(row) for row in results]
-
-
-class GitClient:
-    """Client for local git operations."""
-
-    def __init__(self, repo_path: str = "."):
-        self.repo_path = repo_path
-
-    @property
-    def source(self) -> EvidenceSource:
-        return EvidenceSource.GIT
-
-    def _run(self, *args: str) -> str:
-        result = subprocess.run(
-            ["git", "-C", self.repo_path, *args],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return result.stdout.strip()
-
-    def get_commit(self, sha: str) -> dict[str, Any]:
-        """Get commit info from local git."""
-        format_str = "%H%n%an%n%ae%n%aI%n%cn%n%ce%n%cI%n%P%n%B"
-        output = self._run("show", "-s", f"--format={format_str}", sha)
-        lines = output.split("\n")
-
-        return {
-            "sha": lines[0],
-            "author_name": lines[1],
-            "author_email": lines[2],
-            "author_date": lines[3],
-            "committer_name": lines[4],
-            "committer_email": lines[5],
-            "committer_date": lines[6],
-            "parents": lines[7].split() if lines[7] else [],
-            "message": "\n".join(lines[8:]),
-        }
-
-    def get_commit_files(self, sha: str) -> list[dict[str, Any]]:
-        """Get files changed in a commit."""
-        output = self._run("diff-tree", "--no-commit-id", "--name-status", "-r", sha)
-        files = []
-        for line in output.split("\n"):
-            if line:
-                parts = line.split("\t")
-                status_map = {"A": "added", "M": "modified", "D": "removed", "R": "renamed"}
-                files.append({"status": status_map.get(parts[0][0], "modified"), "filename": parts[-1]})
-        return files
-
-    def get_log(
-        self,
-        ref: str = "HEAD",
-        since: str | None = None,
-        until: str | None = None,
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        """Get commit log."""
-        args = ["log", f"--max-count={limit}", "--format=%H|%an|%ae|%aI|%s", ref]
-        if since:
-            args.append(f"--since={since}")
-        if until:
-            args.append(f"--until={until}")
-
-        output = self._run(*args)
-        commits = []
-        for line in output.split("\n"):
-            if line:
-                parts = line.split("|", 4)
-                commits.append(
-                    {
-                        "sha": parts[0],
-                        "author_name": parts[1],
-                        "author_email": parts[2],
-                        "author_date": parts[3],
-                        "message": parts[4] if len(parts) > 4 else "",
-                    }
-                )
-        return commits
-
-
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
@@ -568,7 +184,7 @@ def _generate_evidence_id(prefix: str, *parts: str) -> str:
     return f"{prefix}-{hash_val}"
 
 
-def _parse_datetime(dt_str: str | None) -> datetime | None:
+def _parse_datetime(dt_str: str | datetime | None) -> datetime | None:
     """Parse datetime from various formats."""
     if dt_str is None:
         return None
@@ -599,321 +215,8 @@ def _make_github_actor(login: str, actor_id: int | None = None) -> GitHubActor:
     return GitHubActor(login=login, id=actor_id)
 
 
-class _GHArchiveRowContext:
-    """Extracted common data from a GH Archive row."""
-
-    __slots__ = ("payload", "owner", "name", "when", "who", "repository", "verification")
-
-    def __init__(self, row: dict[str, Any]):
-        self.payload = json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]
-        self.owner, self.name = row["repo_name"].split("/", 1)
-        self.when = _parse_datetime(row["created_at"])
-        self.who = _make_github_actor(row["actor_login"], row.get("actor_id"))
-        self.repository = _make_github_repo(self.owner, self.name)
-        self.verification = VerificationInfo(
-            source=EvidenceSource.GHARCHIVE,
-            bigquery_table="githubarchive.day.*",
-        )
-
-
 # =============================================================================
-# EVENT CREATION FUNCTIONS - From GHArchive/Git
-# =============================================================================
-
-
-def create_push_event_from_gharchive(row: dict[str, Any]) -> PushEvent:
-    """Create PushEvent from GH Archive row."""
-    ctx = _GHArchiveRowContext(row)
-    payload = ctx.payload
-
-    commits = []
-    for c in payload.get("commits", []):
-        commits.append(
-            CommitInPush(
-                sha=c["sha"],
-                message=c.get("message", ""),
-                author_name=c.get("author", {}).get("name", ""),
-                author_email=c.get("author", {}).get("email", ""),
-            )
-        )
-
-    before_sha = payload.get("before", "0" * 40)
-    after_sha = payload.get("head", payload.get("after", "0" * 40))
-    size = int(payload.get("size", len(commits)))
-    is_force_push = size == 0 and before_sha != "0" * 40
-
-    return PushEvent(
-        evidence_id=_generate_evidence_id("push", row["repo_name"], after_sha),
-        when=ctx.when,
-        who=ctx.who,
-        what=f"Pushed {size} commit(s) to {payload.get('ref', 'unknown')}",
-        repository=ctx.repository,
-        verification=VerificationInfo(
-            source=EvidenceSource.GHARCHIVE,
-            bigquery_table="githubarchive.day.*",
-            query=f"actor.login='{row['actor_login']}' AND repo.name='{row['repo_name']}'",
-        ),
-        ref=payload.get("ref", ""),
-        before_sha=before_sha,
-        after_sha=after_sha,
-        size=size,
-        commits=commits,
-        is_force_push=is_force_push,
-    )
-
-
-def create_pull_request_event_from_gharchive(row: dict[str, Any]) -> PullRequestEvent:
-    """Create PullRequestEvent from GH Archive row."""
-    ctx = _GHArchiveRowContext(row)
-    pr = ctx.payload.get("pull_request", {})
-
-    action_str = ctx.payload.get("action", "opened")
-    action_map = {"opened": PRAction.OPENED, "closed": PRAction.CLOSED, "reopened": PRAction.REOPENED}
-    action = action_map.get(action_str, PRAction.OPENED)
-    if action_str == "closed" and pr.get("merged"):
-        action = PRAction.MERGED
-
-    return PullRequestEvent(
-        evidence_id=_generate_evidence_id("pr", row["repo_name"], str(pr.get("number", 0)), action_str),
-        when=ctx.when,
-        who=ctx.who,
-        what=f"PR #{pr.get('number')} {action_str}",
-        repository=ctx.repository,
-        verification=ctx.verification,
-        action=action,
-        pr_number=pr.get("number", 0),
-        pr_title=pr.get("title", ""),
-        pr_body=pr.get("body"),
-        head_sha=pr.get("head", {}).get("sha"),
-        merged=pr.get("merged", False),
-    )
-
-
-def create_issue_event_from_gharchive(row: dict[str, Any]) -> IssueEvent:
-    """Create IssueEvent from GH Archive row."""
-    ctx = _GHArchiveRowContext(row)
-    issue = ctx.payload.get("issue", {})
-
-    action_str = ctx.payload.get("action", "opened")
-    action_map = {
-        "opened": IssueAction.OPENED,
-        "closed": IssueAction.CLOSED,
-        "reopened": IssueAction.REOPENED,
-        "deleted": IssueAction.DELETED,
-    }
-    action = action_map.get(action_str, IssueAction.OPENED)
-
-    return IssueEvent(
-        evidence_id=_generate_evidence_id("issue", row["repo_name"], str(issue.get("number", 0)), action_str),
-        when=ctx.when,
-        who=ctx.who,
-        what=f"Issue #{issue.get('number')} {action_str}",
-        repository=ctx.repository,
-        verification=ctx.verification,
-        action=action,
-        issue_number=issue.get("number", 0),
-        issue_title=issue.get("title", ""),
-        issue_body=issue.get("body"),
-    )
-
-
-def create_issue_comment_event_from_gharchive(row: dict[str, Any]) -> IssueCommentEvent:
-    """Create IssueCommentEvent from GH Archive row."""
-    ctx = _GHArchiveRowContext(row)
-    issue = ctx.payload.get("issue", {})
-    comment = ctx.payload.get("comment", {})
-
-    return IssueCommentEvent(
-        evidence_id=_generate_evidence_id("comment", row["repo_name"], str(comment.get("id", 0))),
-        when=ctx.when,
-        who=ctx.who,
-        what=f"Comment on issue #{issue.get('number')}",
-        repository=ctx.repository,
-        verification=ctx.verification,
-        action=ctx.payload.get("action", "created"),
-        issue_number=issue.get("number", 0),
-        comment_id=comment.get("id", 0),
-        comment_body=comment.get("body", ""),
-    )
-
-
-def create_create_event_from_gharchive(row: dict[str, Any]) -> CreateEvent:
-    """Create CreateEvent from GH Archive row."""
-    ctx = _GHArchiveRowContext(row)
-
-    ref_type_str = ctx.payload.get("ref_type", "branch")
-    ref_type_map = {"branch": RefType.BRANCH, "tag": RefType.TAG, "repository": RefType.REPOSITORY}
-    ref_type = ref_type_map.get(ref_type_str, RefType.BRANCH)
-    ref_name = ctx.payload.get("ref", "")
-
-    return CreateEvent(
-        evidence_id=_generate_evidence_id("create", row["repo_name"], ref_type_str, ref_name),
-        when=ctx.when,
-        who=ctx.who,
-        what=f"Created {ref_type_str} '{ref_name}'",
-        repository=ctx.repository,
-        verification=ctx.verification,
-        ref_type=ref_type,
-        ref_name=ref_name,
-    )
-
-
-def create_delete_event_from_gharchive(row: dict[str, Any]) -> DeleteEvent:
-    """Create DeleteEvent from GH Archive row."""
-    ctx = _GHArchiveRowContext(row)
-
-    ref_type_str = ctx.payload.get("ref_type", "branch")
-    ref_type_map = {"branch": RefType.BRANCH, "tag": RefType.TAG}
-    ref_type = ref_type_map.get(ref_type_str, RefType.BRANCH)
-    ref_name = ctx.payload.get("ref", "")
-
-    return DeleteEvent(
-        evidence_id=_generate_evidence_id("delete", row["repo_name"], ref_type_str, ref_name),
-        when=ctx.when,
-        who=ctx.who,
-        what=f"Deleted {ref_type_str} '{ref_name}'",
-        repository=ctx.repository,
-        verification=ctx.verification,
-        ref_type=ref_type,
-        ref_name=ref_name,
-    )
-
-
-def create_fork_event_from_gharchive(row: dict[str, Any]) -> ForkEvent:
-    """Create ForkEvent from GH Archive row."""
-    ctx = _GHArchiveRowContext(row)
-    forkee = ctx.payload.get("forkee", {})
-
-    return ForkEvent(
-        evidence_id=_generate_evidence_id("fork", row["repo_name"], forkee.get("full_name", "")),
-        when=ctx.when,
-        who=ctx.who,
-        what=f"Forked to {forkee.get('full_name', '')}",
-        repository=ctx.repository,
-        verification=ctx.verification,
-        fork_full_name=forkee.get("full_name", ""),
-    )
-
-
-def create_workflow_run_event_from_gharchive(row: dict[str, Any]) -> WorkflowRunEvent:
-    """Create WorkflowRunEvent from GH Archive row."""
-    ctx = _GHArchiveRowContext(row)
-    workflow_run = ctx.payload.get("workflow_run", {})
-
-    conclusion_str = workflow_run.get("conclusion")
-    conclusion_map = {
-        "success": WorkflowConclusion.SUCCESS,
-        "failure": WorkflowConclusion.FAILURE,
-        "cancelled": WorkflowConclusion.CANCELLED,
-    }
-    conclusion = conclusion_map.get(conclusion_str) if conclusion_str else None
-
-    return WorkflowRunEvent(
-        evidence_id=_generate_evidence_id("workflow", row["repo_name"], str(workflow_run.get("id", 0))),
-        when=ctx.when,
-        who=ctx.who,
-        what=f"Workflow '{workflow_run.get('name', '')}' {ctx.payload.get('action', '')}",
-        repository=ctx.repository,
-        verification=ctx.verification,
-        action=ctx.payload.get("action", "requested"),
-        workflow_name=workflow_run.get("name", ""),
-        head_sha=workflow_run.get("head_sha", ""),
-        conclusion=conclusion,
-    )
-
-
-def create_release_event_from_gharchive(row: dict[str, Any]) -> ReleaseEvent:
-    """Create ReleaseEvent from GH Archive row."""
-    ctx = _GHArchiveRowContext(row)
-    release = ctx.payload.get("release", {})
-
-    return ReleaseEvent(
-        evidence_id=_generate_evidence_id("release", row["repo_name"], release.get("tag_name", "")),
-        when=ctx.when,
-        who=ctx.who,
-        what=f"Release '{release.get('tag_name', '')}' {ctx.payload.get('action', '')}",
-        repository=ctx.repository,
-        verification=ctx.verification,
-        action=ctx.payload.get("action", "published"),
-        tag_name=release.get("tag_name", ""),
-        release_name=release.get("name"),
-        release_body=release.get("body"),
-    )
-
-
-def create_watch_event_from_gharchive(row: dict[str, Any]) -> WatchEvent:
-    """Create WatchEvent from GH Archive row."""
-    ctx = _GHArchiveRowContext(row)
-
-    return WatchEvent(
-        evidence_id=_generate_evidence_id("watch", row["repo_name"], row["actor_login"]),
-        when=ctx.when,
-        who=ctx.who,
-        what="Starred repository",
-        repository=ctx.repository,
-        verification=ctx.verification,
-    )
-
-
-def create_member_event_from_gharchive(row: dict[str, Any]) -> MemberEvent:
-    """Create MemberEvent from GH Archive row."""
-    ctx = _GHArchiveRowContext(row)
-    member = ctx.payload.get("member", {})
-
-    return MemberEvent(
-        evidence_id=_generate_evidence_id("member", row["repo_name"], member.get("login", "")),
-        when=ctx.when,
-        who=ctx.who,
-        what=f"Member {member.get('login', '')} {ctx.payload.get('action', '')}",
-        repository=ctx.repository,
-        verification=ctx.verification,
-        action=ctx.payload.get("action", "added"),
-        member=_make_github_actor(member.get("login", ""), member.get("id")),
-    )
-
-
-def create_public_event_from_gharchive(row: dict[str, Any]) -> PublicEvent:
-    """Create PublicEvent from GH Archive row."""
-    ctx = _GHArchiveRowContext(row)
-
-    return PublicEvent(
-        evidence_id=_generate_evidence_id("public", row["repo_name"]),
-        when=ctx.when,
-        who=ctx.who,
-        what="Made repository public",
-        repository=ctx.repository,
-        verification=ctx.verification,
-    )
-
-
-# Dispatch table for GH Archive event creation
-GHARCHIVE_EVENT_CREATORS: dict[str, Any] = {
-    "PushEvent": create_push_event_from_gharchive,
-    "PullRequestEvent": create_pull_request_event_from_gharchive,
-    "IssuesEvent": create_issue_event_from_gharchive,
-    "IssueCommentEvent": create_issue_comment_event_from_gharchive,
-    "CreateEvent": create_create_event_from_gharchive,
-    "DeleteEvent": create_delete_event_from_gharchive,
-    "ForkEvent": create_fork_event_from_gharchive,
-    "WorkflowRunEvent": create_workflow_run_event_from_gharchive,
-    "ReleaseEvent": create_release_event_from_gharchive,
-    "WatchEvent": create_watch_event_from_gharchive,
-    "MemberEvent": create_member_event_from_gharchive,
-    "PublicEvent": create_public_event_from_gharchive,
-}
-
-
-def create_event_from_gharchive(row: dict[str, Any]) -> AnyEvent:
-    """Create appropriate Event from GH Archive row based on type."""
-    event_type = row.get("type", "")
-    creator = GHARCHIVE_EVENT_CREATORS.get(event_type)
-    if not creator:
-        raise ValueError(f"Unsupported event type: {event_type}")
-    return creator(row)
-
-
-# =============================================================================
-# OBSERVATION CREATION FUNCTIONS - From GH Archive (deleted content recovery)
+# GH ARCHIVE RECOVERY FUNCTIONS
 # =============================================================================
 
 
@@ -923,7 +226,7 @@ def create_issue_observation_from_gharchive(
     timestamp: str,
     client: GHArchiveClient,
 ) -> IssueObservation:
-    """Query GH Archive and create IssueObservation.
+    """Recover deleted issue content from GH Archive.
 
     Args:
         repo: Full repo name (owner/repo)
@@ -934,7 +237,7 @@ def create_issue_observation_from_gharchive(
     Raises ValueError if issue not found at specified timestamp.
     """
     owner, name = repo.split("/", 1)
-    date = timestamp[:10].replace("-", "")  # YYYYMMDD
+    date = timestamp[:10].replace("-", "")
 
     rows = client.query_events(
         repo=repo,
@@ -942,7 +245,6 @@ def create_issue_observation_from_gharchive(
         from_date=date,
     )
 
-    # Find matching issue at timestamp
     for row in rows:
         payload = json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]
         issue = payload.get("issue", {})
@@ -951,7 +253,7 @@ def create_issue_observation_from_gharchive(
         if issue.get("number") == issue_number and timestamp in row_ts:
             state = issue.get("state", "open")
             return IssueObservation(
-                        evidence_id=_generate_evidence_id("issue-gharchive", repo, str(issue_number), timestamp),
+                evidence_id=_generate_evidence_id("issue-gharchive", repo, str(issue_number), timestamp),
                 original_when=_parse_datetime(issue.get("created_at")),
                 original_who=_make_github_actor(issue.get("user", {}).get("login", row["actor_login"])),
                 original_what=f"Issue #{issue_number} created",
@@ -981,7 +283,7 @@ def create_pr_observation_from_gharchive(
     timestamp: str,
     client: GHArchiveClient,
 ) -> IssueObservation:
-    """Query GH Archive and create PR observation.
+    """Recover deleted PR content from GH Archive.
 
     Args:
         repo: Full repo name (owner/repo)
@@ -1010,7 +312,7 @@ def create_pr_observation_from_gharchive(
             if pr.get("merged"):
                 state = "merged"
             return IssueObservation(
-                        evidence_id=_generate_evidence_id("pr-gharchive", repo, str(pr_number), timestamp),
+                evidence_id=_generate_evidence_id("pr-gharchive", repo, str(pr_number), timestamp),
                 original_when=_parse_datetime(pr.get("created_at")),
                 original_who=_make_github_actor(pr.get("user", {}).get("login", row["actor_login"])),
                 original_what=f"PR #{pr_number} created",
@@ -1040,7 +342,7 @@ def create_commit_observation_from_gharchive(
     timestamp: str,
     client: GHArchiveClient,
 ) -> CommitObservation:
-    """Query GH Archive and create CommitObservation.
+    """Recover commit metadata from GH Archive.
 
     Args:
         repo: Full repo name (owner/repo)
@@ -1068,7 +370,7 @@ def create_commit_observation_from_gharchive(
         for commit in payload.get("commits", []):
             if commit["sha"].startswith(sha) or sha.startswith(commit["sha"]):
                 return CommitObservation(
-                                evidence_id=_generate_evidence_id("commit-gharchive", repo, commit["sha"]),
+                    evidence_id=_generate_evidence_id("commit-gharchive", repo, commit["sha"]),
                     original_when=_parse_datetime(row["created_at"]),
                     original_who=GitHubActor(login=commit.get("author", {}).get("name", "")),
                     original_what=commit.get("message", "").split("\n")[0],
@@ -1106,7 +408,7 @@ def create_force_push_observation_from_gharchive(
     timestamp: str,
     client: GHArchiveClient,
 ) -> CommitObservation:
-    """Query GH Archive for a specific force push event.
+    """Recover force-pushed commit from GH Archive.
 
     Args:
         repo: Full repo name (owner/repo)
@@ -1135,7 +437,7 @@ def create_force_push_observation_from_gharchive(
 
         if size == 0 and before_sha != "0" * 40:
             return CommitObservation(
-                        evidence_id=_generate_evidence_id("forcepush-gharchive", repo, before_sha, timestamp),
+                evidence_id=_generate_evidence_id("forcepush-gharchive", repo, before_sha, timestamp),
                 original_when=_parse_datetime(row["created_at"]),
                 original_who=_make_github_actor(row["actor_login"]),
                 original_what="Commit overwritten by force push",
@@ -1169,7 +471,7 @@ def create_force_push_observation_from_gharchive(
 
 
 # =============================================================================
-# OBSERVATION CREATION FUNCTIONS - From GitHub/Wayback
+# GITHUB API OBSERVATION FUNCTIONS
 # =============================================================================
 
 
@@ -1198,82 +500,37 @@ def create_commit_observation(
     author = commit["author"]
     committer = commit["committer"]
 
-    # GitHub user may be None for old commits (no linked account)
+    # GitHub API may return author as None for commits without a linked GitHub account
     gh_author = data.get("author") or {}
-    actor_login = gh_author.get("login") or author["name"]
 
     return CommitObservation(
         evidence_id=_generate_evidence_id("commit", query.repo.full_name, data["sha"]),
-        original_when=_parse_datetime(author.get("date")),
-        original_who=_make_github_actor(actor_login),
-        original_what=commit["message"].split("\n")[0],
+        original_when=_parse_datetime(committer.get("date")),
+        original_who=_make_github_actor(gh_author.get("login", author.get("name", "unknown"))),
+        original_what=commit.get("message", "").split("\n")[0],
         observed_when=now,
         observed_by=EvidenceSource.GITHUB,
         observed_what=f"Commit {data['sha'][:8]} observed via GitHub API",
         repository=_make_github_repo(query.repo.owner, query.repo.name),
         verification=VerificationInfo(
             source=EvidenceSource.GITHUB,
-            url=HttpUrl(data["html_url"]),
+            url=HttpUrl(f"https://github.com/{query.repo.full_name}/commit/{data['sha']}"),
         ),
         sha=data["sha"],
-        message=commit["message"],
+        message=commit.get("message", ""),
         author=CommitAuthor(
-            name=author["name"],
-            email=author["email"],
-            date=_parse_datetime(author["date"]),
+            name=author.get("name", ""),
+            email=author.get("email", ""),
+            date=_parse_datetime(author.get("date")),
         ),
         committer=CommitAuthor(
-            name=committer["name"],
-            email=committer["email"],
-            date=_parse_datetime(committer["date"]),
+            name=committer.get("name", ""),
+            email=committer.get("email", ""),
+            date=_parse_datetime(committer.get("date")),
         ),
         parents=[p["sha"] for p in data.get("parents", [])],
         files=files,
         is_dangling=False,
-    )
-
-
-def create_commit_observation_from_git(
-    sha: str,
-    client: GitClient,
-    repo: RepositoryQuery | None = None,
-    observed_when: datetime | None = None,
-) -> CommitObservation:
-    """Create CommitObservation from local git repository."""
-    data = client.get_commit(sha)
-    files_data = client.get_commit_files(sha)
-    now = observed_when or datetime.now(timezone.utc)
-
-    files = [FileChange(filename=f["filename"], status=f["status"]) for f in files_data]
-
-    repository = None
-    if repo:
-        repository = _make_github_repo(repo.owner, repo.name)
-
-    return CommitObservation(
-        evidence_id=_generate_evidence_id("commit", data["sha"]),
-        original_when=_parse_datetime(data["author_date"]),
-        original_who=GitHubActor(login=data["author_name"]),
-        original_what=data["message"].split("\n")[0],
-        observed_when=now,
-        observed_by=EvidenceSource.GIT,
-        observed_what=f"Commit {data['sha'][:8]} observed via local git",
-        repository=repository,
-        verification=VerificationInfo(source=EvidenceSource.GIT),
-        sha=data["sha"],
-        message=data["message"],
-        author=CommitAuthor(
-            name=data["author_name"],
-            email=data["author_email"],
-            date=_parse_datetime(data["author_date"]),
-        ),
-        committer=CommitAuthor(
-            name=data["committer_name"],
-            email=data["committer_email"],
-            date=_parse_datetime(data["committer_date"]),
-        ),
-        parents=data["parents"],
-        files=files,
     )
 
 
@@ -1289,30 +546,29 @@ def create_issue_observation(
         data = client.get_issue(query.repo.owner, query.repo.name, query.number)
 
     now = observed_when or datetime.now(timezone.utc)
-
-    # Determine state
     state = data.get("state", "open")
-    if query.is_pull_request and data.get("merged"):
+    if data.get("merged"):
         state = "merged"
 
     return IssueObservation(
         evidence_id=_generate_evidence_id("issue", query.repo.full_name, str(query.number)),
         original_when=_parse_datetime(data.get("created_at")),
-        original_who=_make_github_actor(data["user"]["login"], data["user"].get("id")),
-        original_what=f"{'PR' if query.is_pull_request else 'Issue'} #{query.number} opened",
+        original_who=_make_github_actor(data.get("user", {}).get("login", "unknown")),
+        original_what=f"{'PR' if query.is_pull_request else 'Issue'} #{query.number} created",
         observed_when=now,
         observed_by=EvidenceSource.GITHUB,
-        observed_what=f"Issue #{query.number} observed via GitHub API",
+        observed_what=f"{'PR' if query.is_pull_request else 'Issue'} #{query.number} observed via GitHub API",
         repository=_make_github_repo(query.repo.owner, query.repo.name),
         verification=VerificationInfo(
             source=EvidenceSource.GITHUB,
-            url=HttpUrl(data["html_url"]),
+            url=HttpUrl(f"https://github.com/{query.repo.full_name}/{'pull' if query.is_pull_request else 'issues'}/{query.number}"),
         ),
         issue_number=query.number,
         is_pull_request=query.is_pull_request,
         title=data.get("title"),
         body=data.get("body"),
         state=state,
+        is_deleted=False,
     )
 
 
@@ -1323,31 +579,31 @@ def create_file_observation(
 ) -> FileObservation:
     """Create FileObservation by fetching from GitHub API."""
     import base64
+    import hashlib as hl
 
     data = client.get_file(query.repo.owner, query.repo.name, query.path, query.ref)
     now = observed_when or datetime.now(timezone.utc)
 
-    # Decode content
     content = ""
     if data.get("content"):
         content = base64.b64decode(data["content"]).decode("utf-8", errors="replace")
 
-    content_hash = hashlib.sha256(content.encode()).hexdigest()
+    content_hash = hl.sha256(content.encode()).hexdigest()
 
     return FileObservation(
         evidence_id=_generate_evidence_id("file", query.repo.full_name, query.path, query.ref),
         observed_when=now,
         observed_by=EvidenceSource.GITHUB,
-        observed_what=f"File {query.path} observed via GitHub API",
+        observed_what=f"File {query.path} at {query.ref} observed via GitHub API",
         repository=_make_github_repo(query.repo.owner, query.repo.name),
         verification=VerificationInfo(
             source=EvidenceSource.GITHUB,
-            url=HttpUrl(data["html_url"]),
+            url=HttpUrl(f"https://github.com/{query.repo.full_name}/blob/{query.ref}/{query.path}"),
         ),
         file_path=query.path,
         branch=query.ref if query.ref != "HEAD" else None,
-        content=content,
         content_hash=content_hash,
+        size_bytes=data.get("size", 0),
     )
 
 
@@ -1371,7 +627,8 @@ def create_branch_observation(
             url=HttpUrl(f"https://github.com/{query.repo.full_name}/tree/{query.branch_name}"),
         ),
         branch_name=query.branch_name,
-        head_sha=data["commit"]["sha"],
+        head_sha=data.get("commit", {}).get("sha"),
+        protected=data.get("protected", False),
     )
 
 
@@ -1395,7 +652,7 @@ def create_tag_observation(
             url=HttpUrl(f"https://github.com/{query.repo.full_name}/releases/tag/{query.tag_name}"),
         ),
         tag_name=query.tag_name,
-        target_sha=data["object"]["sha"],
+        target_sha=data.get("object", {}).get("sha"),
     )
 
 
@@ -1410,20 +667,21 @@ def create_release_observation(
 
     return ReleaseObservation(
         evidence_id=_generate_evidence_id("release", query.repo.full_name, query.tag_name),
-        original_when=_parse_datetime(data.get("created_at")),
-        original_who=_make_github_actor(data["author"]["login"], data["author"].get("id")),
-        original_what=f"Release {query.tag_name} published",
         observed_when=now,
         observed_by=EvidenceSource.GITHUB,
         observed_what=f"Release {query.tag_name} observed via GitHub API",
         repository=_make_github_repo(query.repo.owner, query.repo.name),
         verification=VerificationInfo(
             source=EvidenceSource.GITHUB,
-            url=HttpUrl(data["html_url"]),
+            url=HttpUrl(f"https://github.com/{query.repo.full_name}/releases/tag/{query.tag_name}"),
         ),
         tag_name=query.tag_name,
-        release_name=data.get("name"),
-        release_body=data.get("body"),
+        name=data.get("name"),
+        body=data.get("body"),
+        created_at=_parse_datetime(data.get("created_at")),
+        published_at=_parse_datetime(data.get("published_at")),
+        is_prerelease=data.get("prerelease", False),
+        is_draft=data.get("draft", False),
     )
 
 
@@ -1440,20 +698,19 @@ def create_fork_observations(
     for fork in data:
         observations.append(
             ForkObservation(
-                        evidence_id=_generate_evidence_id("fork", query.repo.full_name, fork["full_name"]),
-                original_when=_parse_datetime(fork.get("created_at")),
-                original_who=_make_github_actor(fork["owner"]["login"], fork["owner"].get("id")),
-                original_what=f"Forked {query.repo.full_name}",
+                evidence_id=_generate_evidence_id("fork", query.repo.full_name, fork["full_name"]),
                 observed_when=now,
                 observed_by=EvidenceSource.GITHUB,
                 observed_what=f"Fork {fork['full_name']} observed via GitHub API",
                 repository=_make_github_repo(query.repo.owner, query.repo.name),
                 verification=VerificationInfo(
                     source=EvidenceSource.GITHUB,
-                    url=HttpUrl(fork["html_url"]),
+                    url=HttpUrl(f"https://github.com/{fork['full_name']}"),
                 ),
+                fork_owner=fork["owner"]["login"],
+                fork_repo=fork["name"],
                 fork_full_name=fork["full_name"],
-                parent_full_name=query.repo.full_name,
+                forked_at=_parse_datetime(fork.get("created_at")),
             )
         )
 
@@ -1465,34 +722,22 @@ def create_snapshot_observation(
     client: WaybackClient,
     observed_when: datetime | None = None,
 ) -> SnapshotObservation:
-    """Create SnapshotObservation by querying Wayback CDX API."""
-    results = client.search_cdx(
-        str(query.url),
+    """Create SnapshotObservation by fetching from Wayback Machine."""
+    snapshots_data = client.search_cdx(
+        url=str(query.url),
         from_date=query.from_date,
         to_date=query.to_date,
     )
     now = observed_when or datetime.now(timezone.utc)
 
     snapshots = []
-    for r in results:
-        # Parse timestamp: YYYYMMDDHHMMSS
-        ts = r["timestamp"]
-        captured = datetime(
-            int(ts[:4]),
-            int(ts[4:6]),
-            int(ts[6:8]),
-            int(ts[8:10]) if len(ts) > 8 else 0,
-            int(ts[10:12]) if len(ts) > 10 else 0,
-            int(ts[12:14]) if len(ts) > 12 else 0,
-            tzinfo=timezone.utc,
-        )
+    for s in snapshots_data:
         snapshots.append(
             WaybackSnapshot(
-                timestamp=ts,
-                captured_at=captured,
-                archive_url=HttpUrl(f"https://web.archive.org/web/{ts}/{r['original']}"),
-                original_url=HttpUrl(r["original"]),
-                status_code=int(r.get("statuscode", 200)),
+                timestamp=s.get("timestamp", ""),
+                original=s.get("original", ""),
+                digest=s.get("digest", ""),
+                mimetype=s.get("mimetype", ""),
             )
         )
 
@@ -1524,7 +769,6 @@ def create_ioc(
     """
     import requests
 
-    # Fetch and verify at source
     try:
         resp = requests.get(str(source_url), timeout=30)
         resp.raise_for_status()
@@ -1532,7 +776,6 @@ def create_ioc(
     except Exception as e:
         raise ValueError(f"Failed to fetch source URL {source_url}: {e}")
 
-    # Check if IOC value appears in the page
     if value.lower() not in content.lower():
         raise ValueError(f"IOC value '{value[:50]}' not found in source {source_url}")
 
@@ -1564,17 +807,7 @@ def create_article_observation(
     summary: str | None = None,
     observed_when: datetime | None = None,
 ) -> ArticleObservation:
-    """Create an ArticleObservation for a blog post or security report.
-
-    Args:
-        url: URL of the article
-        title: Title of the article
-        author: Author name (optional)
-        published_date: When the article was published (optional)
-        source_name: Name of the publication (e.g., "404media", "mbgsec.com")
-        summary: Brief summary of the article
-        observed_when: When we observed/documented this article
-    """
+    """Create an ArticleObservation for a blog post or security report."""
     now = observed_when or datetime.now(timezone.utc)
 
     return ArticleObservation(
@@ -1596,7 +829,7 @@ def create_article_observation(
 
 
 # =============================================================================
-# HIGH-LEVEL FACTORY FUNCTIONS
+# EVIDENCE FACTORY
 # =============================================================================
 
 
@@ -1701,7 +934,7 @@ class EvidenceFactory:
         """Query GH Archive and create Events.
 
         Args:
-            timestamp: Specific time in YYYYMMDDHHMM format (e.g., "202507131207" for July 13, 2025 12:07 UTC)
+            timestamp: Specific time in YYYYMMDDHHMM format
             repo: Repository in "owner/name" format (required if no actor)
             actor: GitHub username (required if no repo)
             event_type: Filter by event type (e.g., "PushEvent")
@@ -1710,31 +943,13 @@ class EvidenceFactory:
             ValueError: If timestamp is not 12 digits or neither repo nor actor is specified
         """
         if len(timestamp) != 12 or not timestamp.isdigit():
-            raise ValueError(
-                f"timestamp must be YYYYMMDDHHMM format (12 digits), got: {timestamp}"
-            )
+            raise ValueError(f"timestamp must be YYYYMMDDHHMM format (12 digits), got: {timestamp}")
 
         if not repo and not actor:
-            raise ValueError(
-                "Must specify at least 'repo' or 'actor' to avoid expensive full-table scans"
-            )
-
-        repo_query = None
-        if repo:
-            parts = repo.split("/", 1)
-            if len(parts) == 2:
-                repo_query = RepositoryQuery(owner=parts[0], name=parts[1])
-
-        query = GHArchiveQuery(
-            repo=repo_query,
-            actor=actor,
-            event_type=event_type,
-            from_date=timestamp,
-            to_date=timestamp,
-        )
+            raise ValueError("Must specify at least 'repo' or 'actor' to avoid expensive full-table scans")
 
         rows = self.gharchive.query_events(
-            repo=repo_query.full_name if repo_query else None,
+            repo=repo,
             actor=actor,
             event_type=event_type,
             from_date=timestamp,
@@ -1744,7 +959,7 @@ class EvidenceFactory:
         events = []
         for row in rows:
             try:
-                events.append(create_event_from_gharchive(row))
+                events.append(parse_gharchive_event(row))
             except (KeyError, ValueError):
                 continue
 
@@ -1757,10 +972,7 @@ class EvidenceFactory:
         source_url: str,
         extracted_from: str | None = None,
     ) -> IOC:
-        """Create an IOC by verifying it exists in vendor report.
-
-        Raises ValueError if IOC cannot be verified at source.
-        """
+        """Create an IOC by verifying it exists in vendor report."""
         if isinstance(ioc_type, str):
             ioc_type = IOCType(ioc_type)
         return create_ioc(
@@ -1789,43 +1001,20 @@ class EvidenceFactory:
             summary=summary,
         )
 
-    # GH Archive recovery methods - require exact timestamp
+    # GH Archive recovery methods
 
     def recover_issue(self, repo: str, issue_number: int, timestamp: str) -> IssueObservation:
-        """Recover deleted issue content from GH Archive.
-
-        Args:
-            repo: Full repo name (owner/repo)
-            issue_number: Issue number
-            timestamp: ISO timestamp when event occurred (e.g. "2025-07-13T20:30:24Z")
-        """
+        """Recover deleted issue content from GH Archive."""
         return create_issue_observation_from_gharchive(repo, issue_number, timestamp, self.gharchive)
 
     def recover_pr(self, repo: str, pr_number: int, timestamp: str) -> IssueObservation:
-        """Recover deleted PR content from GH Archive.
-
-        Args:
-            repo: Full repo name (owner/repo)
-            pr_number: PR number
-            timestamp: ISO timestamp when event occurred
-        """
+        """Recover deleted PR content from GH Archive."""
         return create_pr_observation_from_gharchive(repo, pr_number, timestamp, self.gharchive)
 
     def recover_commit(self, repo: str, sha: str, timestamp: str) -> CommitObservation:
-        """Recover commit metadata from GH Archive.
-
-        Args:
-            repo: Full repo name (owner/repo)
-            sha: Commit SHA (full or prefix)
-            timestamp: ISO timestamp when push event occurred
-        """
+        """Recover commit metadata from GH Archive."""
         return create_commit_observation_from_gharchive(repo, sha, timestamp, self.gharchive)
 
     def recover_force_push(self, repo: str, timestamp: str) -> CommitObservation:
-        """Recover force-pushed commit from GH Archive.
-
-        Args:
-            repo: Full repo name (owner/repo)
-            timestamp: ISO timestamp when force push occurred
-        """
+        """Recover force-pushed commit from GH Archive."""
         return create_force_push_observation_from_gharchive(repo, timestamp, self.gharchive)

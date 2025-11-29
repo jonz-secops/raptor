@@ -14,11 +14,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src._creation import (
-    create_push_event_from_gharchive,
-    create_issue_event_from_gharchive,
-    create_create_event_from_gharchive,
-    create_event_from_gharchive,
+from src._parsers import (
+    parse_push_event,
+    parse_issue_event,
+    parse_create_event,
+    parse_gharchive_event,
 )
 from src._schema import EvidenceSource
 
@@ -52,7 +52,7 @@ class TestPushEventParsing:
         assert len(push_events) > 0
 
         row = push_events[0]
-        event = create_push_event_from_gharchive(row)
+        event = parse_push_event(row)
 
         assert event.event_type == "push"
         assert event.verification.source == EvidenceSource.GHARCHIVE
@@ -66,7 +66,7 @@ class TestPushEventParsing:
             if e["type"] == "PushEvent" and len(e["payload"]["commits"]) > 0
         )
 
-        event = create_push_event_from_gharchive(push_with_commits)
+        event = parse_push_event(push_with_commits)
 
         assert len(event.commits) > 0
         assert event.commits[0].sha is not None
@@ -75,7 +75,7 @@ class TestPushEventParsing:
     def test_push_event_generates_evidence_id(self, gharchive_events):
         """Push event generates unique evidence ID."""
         push_event = next(e for e in gharchive_events if e["type"] == "PushEvent")
-        event = create_push_event_from_gharchive(push_event)
+        event = parse_push_event(push_event)
 
         assert event.evidence_id is not None
         assert event.evidence_id.startswith("push-")
@@ -83,14 +83,14 @@ class TestPushEventParsing:
     def test_push_event_has_who_field(self, gharchive_events):
         """Push event extracts who (actor) information."""
         push_event = next(e for e in gharchive_events if e["type"] == "PushEvent")
-        event = create_push_event_from_gharchive(push_event)
+        event = parse_push_event(push_event)
 
         assert event.who.login == push_event["actor_login"]
 
     def test_push_event_has_repository(self, gharchive_events):
         """Push event extracts repository information."""
         push_event = next(e for e in gharchive_events if e["type"] == "PushEvent")
-        event = create_push_event_from_gharchive(push_event)
+        event = parse_push_event(push_event)
 
         assert event.repository.full_name == push_event["repo_name"]
 
@@ -109,7 +109,7 @@ class TestIssueEventParsing:
         assert len(issue_events) > 0
 
         row = issue_events[0]
-        event = create_issue_event_from_gharchive(row)
+        event = parse_issue_event(row)
 
         assert event.event_type == "issue"
         assert event.verification.source == EvidenceSource.GHARCHIVE
@@ -118,7 +118,7 @@ class TestIssueEventParsing:
     def test_issue_event_extracts_title(self, gharchive_events):
         """Issue event extracts the issue title."""
         issue_event = next(e for e in gharchive_events if e["type"] == "IssuesEvent")
-        event = create_issue_event_from_gharchive(issue_event)
+        event = parse_issue_event(issue_event)
 
         expected_title = issue_event["payload"]["issue"]["title"]
         assert event.issue_title == expected_title
@@ -126,7 +126,7 @@ class TestIssueEventParsing:
     def test_issue_event_extracts_action(self, gharchive_events):
         """Issue event extracts the action (opened, closed, etc)."""
         issue_event = next(e for e in gharchive_events if e["type"] == "IssuesEvent")
-        event = create_issue_event_from_gharchive(issue_event)
+        event = parse_issue_event(issue_event)
 
         assert event.action == issue_event["payload"]["action"]
 
@@ -136,7 +136,7 @@ class TestIssueEventParsing:
             e for e in gharchive_events
             if e["type"] == "IssuesEvent" and e["payload"]["issue"].get("body")
         )
-        event = create_issue_event_from_gharchive(issue_event)
+        event = parse_issue_event(issue_event)
 
         assert event.issue_body is not None
         assert len(event.issue_body) > 0
@@ -158,7 +158,7 @@ class TestCreateEventParsing:
             pytest.skip("No CreateEvent in fixture")
 
         row = create_events[0]
-        event = create_create_event_from_gharchive(row)
+        event = parse_create_event(row)
 
         assert event.event_type == "create"
         assert event.verification.source == EvidenceSource.GHARCHIVE
@@ -173,7 +173,7 @@ class TestCreateEventParsing:
         if create_event is None:
             pytest.skip("No CreateEvent in fixture")
 
-        event = create_create_event_from_gharchive(create_event)
+        event = parse_create_event(create_event)
 
         assert event.ref_type in ["branch", "tag", "repository"]
         assert event.ref_name is not None
@@ -185,19 +185,19 @@ class TestCreateEventParsing:
 
 
 class TestEventDispatcher:
-    """Test the create_event_from_gharchive dispatcher."""
+    """Test the parse_gharchive_event dispatcher function."""
 
     def test_dispatcher_handles_push_event(self, gharchive_events):
         """Dispatcher correctly routes PushEvent."""
         push_event = next(e for e in gharchive_events if e["type"] == "PushEvent")
-        event = create_event_from_gharchive(push_event)
+        event = parse_gharchive_event(push_event)
 
         assert event.event_type == "push"
 
     def test_dispatcher_handles_issue_event(self, gharchive_events):
         """Dispatcher correctly routes IssuesEvent."""
         issue_event = next(e for e in gharchive_events if e["type"] == "IssuesEvent")
-        event = create_event_from_gharchive(issue_event)
+        event = parse_gharchive_event(issue_event)
 
         assert event.event_type == "issue"
 
@@ -211,7 +211,7 @@ class TestEventDispatcher:
         if create_event is None:
             pytest.skip("No CreateEvent in fixture")
 
-        event = create_event_from_gharchive(create_event)
+        event = parse_gharchive_event(create_event)
         assert event.event_type == "create"
 
     def test_dispatcher_raises_for_unknown_event(self):
@@ -227,7 +227,7 @@ class TestEventDispatcher:
         }
 
         with pytest.raises(ValueError, match="Unsupported.*event.*type"):
-            create_event_from_gharchive(unknown_event)
+            parse_gharchive_event(unknown_event)
 
 
 # =============================================================================
@@ -242,8 +242,8 @@ class TestEvidenceIdGeneration:
         """Parsing the same event twice produces the same evidence ID."""
         push_event = next(e for e in gharchive_events if e["type"] == "PushEvent")
 
-        event1 = create_push_event_from_gharchive(push_event)
-        event2 = create_push_event_from_gharchive(push_event)
+        event1 = parse_push_event(push_event)
+        event2 = parse_push_event(push_event)
 
         assert event1.evidence_id == event2.evidence_id
 
@@ -252,8 +252,8 @@ class TestEvidenceIdGeneration:
         push_events = [e for e in gharchive_events if e["type"] == "PushEvent"]
         assert len(push_events) >= 2
 
-        event1 = create_push_event_from_gharchive(push_events[0])
-        event2 = create_push_event_from_gharchive(push_events[1])
+        event1 = parse_push_event(push_events[0])
+        event2 = parse_push_event(push_events[1])
 
         assert event1.evidence_id != event2.evidence_id
 

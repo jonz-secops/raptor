@@ -225,21 +225,41 @@ class TestIOCIntegration:
         assert ioc.verification.source == EvidenceSource.SECURITY_VENDOR
 
     def test_ioc_rejects_value_not_in_source(self, factory):
-        """IOC creation should fail if value is not found in the source."""
+        """IOC creation should fail if value is not found in the source.
+
+        True integration test - hits the real URL.
+        Skips gracefully if external service unavailable.
+        """
+        import requests
+
+        source_url = "https://mbgsec.com/posts/2025-07-24-constructing-a-timeline-for-amazon-q-prompt-infection/"
+
+        # Pre-flight check: skip if service unavailable
+        try:
+            resp = requests.get(source_url, timeout=10)
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            pytest.skip(f"External service unavailable: {e}")
+
+        # Actual test
         with pytest.raises(ValueError, match="not found in source"):
             factory.ioc(
                 ioc_type=IOCType.COMMIT_SHA,
-                value="this_sha_is_not_in_the_article",
-                source_url="https://mbgsec.com/posts/2025-07-24-constructing-a-timeline-for-amazon-q-prompt-infection/",
+                value="this_sha_is_definitely_not_in_article_xyz123",
+                source_url=source_url,
             )
 
     def test_ioc_fails_on_invalid_url(self, factory):
-        """IOC creation should fail gracefully on unreachable URLs."""
-        with pytest.raises(Exception):  # Could be ConnectionError, HTTPError, etc.
+        """IOC creation should fail gracefully on unreachable URLs.
+
+        True integration test - verifies actual network error handling.
+        Uses .invalid TLD which is guaranteed to not resolve (RFC 2606).
+        """
+        with pytest.raises(ValueError, match="Failed to fetch"):
             factory.ioc(
                 ioc_type=IOCType.COMMIT_SHA,
                 value="anything",
-                source_url="https://this-domain-does-not-exist-12345.com/article",
+                source_url="https://this-will-never-resolve.invalid/article",
             )
 
 
