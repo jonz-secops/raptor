@@ -97,28 +97,30 @@ Try /analyze on one of our tests /tests/data
 ## DevContainer and Dockerfile for easy onboarding
 
 Pre-installed security tools:
-
-*     Semgrep (static analysis)
-*     CodeQL CLI v2.15.5 (semantic code analysis)
-*     AFL++ (fuzzing)
-*     rr debugger (deterministic record-replay debugging)
+```
+Semgrep (static analysis)
+CodeQL CLI v2.15.5 (semantic code analysis)
+AFL++ (fuzzing)
+rr debugger (deterministic record-replay debugging)
+```
 
 Build & debugging tools:
-
-*     gcc, g++, clang-format, make, cmake, autotools
-*     gdb, gdb-multiarch, binutils
+```
+gcc, g++, clang-format, make, cmake, autotools
+gdb, gdb-multiarch, binutils
+```
 
 Web testing:
-
-*     Playwright browser automation (Chromium, Firefox, Webkit browsers)
-
+```
+Playwright browser automation (Chromium, Firefox, Webkit browsers)
+```
 
 Runtime notes:
-
-*     Runs with --privileged flag required for rr debugger
-*     PYTHONPATH configured for /workspaces/raptor imports
-*     All Playwright browsers pre-downloaded
-
+```
+Runs with --privileged flag required for rr debugger
+PYTHONPATH configured for /workspaces/raptor imports
+All Playwright browsers pre-downloaded
+```
 ### Usage
 
 Open in VS Code or any of its forks with Dev Container: Open Folder in Container command.
